@@ -123,7 +123,7 @@ class Database {
       "POST",
       base,
       "items",
-      data,
+      { item: data },
     );
     if ("errors" in result) {
       throw new ErrorResponse(result.errors.join(";"));
@@ -267,7 +267,7 @@ async function init() {
   }
 }
 
-function handler(req: Request) {
+async function handler(req: Request) {
   console.log(new Date(), req.method, req.url);
   const uri = new URL(req.url);
 
@@ -282,21 +282,21 @@ function handler(req: Request) {
       }
 
       if (uri.pathname === "/followers") {
-        return handleFollowers(req);
+        return await handleFollowers(req);
       }
 
       if (uri.pathname === "/following") {
-        return handleFollowing(req);
+        return await handleFollowing(req);
       }
 
       if (uri.pathname === "/outbox") {
-        return handleOutbox(req);
+        return await handleOutbox(req);
       }
     }
 
     if (req.method === "POST") {
       if (uri.pathname === "/account") {
-        return handleUpdateAccount(req);
+        return await handleUpdateAccount(req);
       }
 
       if (uri.pathname === "/inbox") {
@@ -304,7 +304,7 @@ function handler(req: Request) {
       }
 
       if (uri.pathname === "/create") {
-        return handleCreate(req);
+        return await handleCreate(req);
       }
     }
 
@@ -485,7 +485,7 @@ function collectionHandler<T>(
         totalItems: res.paging.size,
         id: `${Origin || uri.origin}/${path}?key=`,
         orderedItems: res.items.map(mapFn),
-        next: res.items.length
+        next: res.items.length && res.paging.last
           ? `${Origin || uri.origin}/${path}?key=${res.paging.last}`
           : void 0,
       });
