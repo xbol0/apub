@@ -1,36 +1,20 @@
-// Used envs:
-// DB_URL
-// PORT
-// PUBLIC_KEY
-// BASE_PREFIX
-// USERNAME
-
-// Base names:
-// posts
-// inbox
-// outbox
-// summary
-// followers
-// nonce
-import { serve } from "https://deno.land/std@0.170.0/http/server.ts";
+import * as http from "https://deno.land/std@0.170.0/http/server.ts";
 import * as _hex from "https://deno.land/std@0.170.0/encoding/hex.ts";
 import * as base64 from "https://deno.land/std@0.170.0/encoding/base64.ts";
 import * as ed25519 from "https://esm.sh/@noble/ed25519@1.7.1";
 
 class ErrorResponse extends Error {
-  status = 400;
-  title = "Bad request";
+  status: number;
 
-  constructor(message: string, title?: string, status?: number) {
+  constructor(message: string, status = 400) {
     super(message);
 
-    if (title) this.title = title;
-    if (status) this.status = status;
+    this.status = status;
   }
 
   toResponse() {
     return new Response(
-      JSON.stringify({ error: this.title, description: this.message }),
+      JSON.stringify({ error: this.message }),
       { status: this.status, headers: CommonHeader },
     );
   }
@@ -52,38 +36,29 @@ class Database {
     base: string,
     target: string,
     body: unknown = null,
-    throwError = false,
   ) {
     const uri = new URL(`${base}/${target}`, this.endpoint);
     const res = await fetch(uri.href, {
       method,
       body: body === null ? body : JSON.stringify(body),
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": this.secret,
-      },
+      headers: { "content-type": "application/json", "x-api-key": this.secret },
     });
-    if (throwError && res.status >= 400) {
-      //TODO: Error detail
-      throw new Error();
+
+    // Throw the first error when request fail
+    if (res.status >= 400) {
+      const err = await res.json() as { errors: string[] };
+      throw new ErrorResponse(err.errors[0]);
     }
+
     return await res.json() as T;
   }
 
-  async fetch<T extends Record<string, unknown>>(
+  async fetch<T extends AnyObject>(
     base: string,
     id: string,
   ): Promise<T | null> {
     try {
-      const res = await this._request<(T | { errors: string[] })>(
-        "GET",
-        base,
-        `items/${id}`,
-        null,
-        true,
-      );
-      if ("errors" in res) return null;
-      return res;
+      return await this._request<T>("GET", base, `items/${id}`);
     } catch {
       return null;
     }
@@ -91,19 +66,14 @@ class Database {
 
   query<T>(
     base: string,
-    query: unknown = [],
+    query: unknown[] = [],
     opts?: Partial<{ limit: number; last: string }>,
   ): Promise<{ items: T[]; paging: { size: number; last: string } }> {
-    return this._request("POST", base, "query", {
-      query,
-      limit: opts?.limit || 10,
-      last: opts?.last || "",
-    });
+    return this._request("POST", base, "query", { ...opts, query });
   }
 
-  async queryAll<T>(base: string, query: unknown = []): Promise<T[]> {
-    let result: T[] = [];
-    let last = "";
+  async queryAll<T>(base: string, query: unknown[] = []): Promise<T[]> {
+    let result: T[] = [], last = "";
     while (true) {
       const tmp = await this.query<T>(base, query, { last });
       result = result.concat(tmp.items);
@@ -117,37 +87,20 @@ class Database {
     }
   }
 
-  async insert(base: string, data: Record<string, unknown>, expires?: number) {
-    if (expires) data.__expires = expires;
-    const result = await this._request<{ key: string } | { errors: string[] }>(
-      "POST",
-      base,
-      "items",
-      { item: data },
-    );
-    if ("errors" in result) {
-      throw new ErrorResponse(result.errors.join(";"));
-    } else {
-      return result.key;
-    }
+  async insert(base: string, item: AnyObject, expires?: number) {
+    if (expires) item.__expires = expires;
+    type Res = { key: string };
+    const result = await this._request<Res>("POST", base, "items", { item });
+    return result.key;
   }
 
-  put(base: string, datas: Record<string, unknown>[], expires?: number) {
-    if (expires) {
-      datas = datas.map((i) => {
-        i.__expires = expires;
-        return i;
-      });
-    }
-    return this._request("PUT", base, "items", { items: datas }) as Promise<
-      { errors: string[] } | { processed: unknown }
-    >;
+  async put(base: string, items: AnyObject[], expires?: number) {
+    if (expires) items = items.map((i) => ({ ...i, __expires: expires }));
+    await this._request("PUT", base, "items", { items });
   }
 
-  update(base: string, key: string, params: DBUpdateParams) {
-    return this._request("PATCH", base, `items/${key}`, params) as Promise<
-      { errors: string[] } | { key: string }
-    >;
+  async update(base: string, key: string, params: DBUpdateParams) {
+    await this._request("PATCH", base, `items/${key}`, params);
   }
 
   async delete(base: string, key: string) {
@@ -176,26 +129,28 @@ const CommonHeader = {
   "access-control-allow-origin": "*",
 };
 
-const handleFollowers = collectionHandler<FollowerItem>(
-  "followers",
-  BaseFollowers,
-  "total_followers",
-  (i) => i.href,
+const Router = new Map<string, http.Handler>();
+Router.set("GET/.well-known/webfinger", handleWebfinger);
+Router.set("GET/@" + Username, handleAccount);
+Router.set(
+  "GET/followers",
+  collectionHandler<FollowerItem>("followers", BaseFollowers, (i) => i.href),
 );
-const handleFollowing = collectionHandler<FollowerItem>(
-  "following",
-  BaseFollowing,
-  "total_following",
-  (i) => i.href,
+Router.set(
+  "GET/following",
+  collectionHandler<FollowerItem>("following", BaseFollowing, (i) => i.href),
 );
-const handleOutbox = collectionHandler(
-  "outbox",
-  BaseOutbox,
-  "total_outbox",
-  (i) => i,
+Router.set(
+  "GET/outbox",
+  collectionHandler("outbox", BaseOutbox, (i) => i),
 );
+Router.set("POST/account", handleUpdateAccount);
+Router.set("POST/create", handleCreate);
+Router.set("POST/inbox", handleInbox);
 
 async function start() {
+  // Checking params for initialize
+  //
   if (AdminPublicKey.length !== 32) {
     throw new Error("Invalid admin public key");
   }
@@ -204,8 +159,10 @@ async function start() {
     throw new Error("Please specific a valid username");
   }
 
+  // Initialize and start server
+  //
   await init();
-  serve(handler, { port });
+  http.serve(handler, { port });
 }
 
 async function init() {
@@ -234,15 +191,10 @@ async function init() {
     const publicKey = "-----BEGIN PUBLIC KEY-----\n" +
       base64.encode(publicKeyBuf) + "\n-----END PUBLIC KEY-----";
 
-    const res = await db.put(BaseSummary, [
+    await db.put(BaseSummary, [
       { key: "main_private_key", value: privateKey },
       { key: "main_public_key", value: publicKey },
     ]);
-
-    if ("errors" in res) {
-      // Init private key fail
-      throw new Error(res.errors.join("\n"));
-    }
 
     PrivateKey = k.privateKey;
     PublicKey = publicKey;
@@ -267,53 +219,21 @@ async function init() {
   }
 }
 
-async function handler(req: Request) {
+async function handler(req: Request, info: http.ConnInfo) {
+  if (req.method === "OPTIONS") return respond(null, 204);
   console.log(new Date(), req.method, req.url);
-  const uri = new URL(req.url);
+
+  const entry = req.method + new URL(req.url).pathname;
+  const fn = Router.get(entry);
+
+  if (!fn) return respond(null, 404);
 
   try {
-    if (req.method === "GET") {
-      if (uri.pathname === "/.well-known/webfinger") {
-        return handleWebfinger(req);
-      }
-
-      if (uri.pathname === "/@" + Username) {
-        return handleAccount(req);
-      }
-
-      if (uri.pathname === "/followers") {
-        return await handleFollowers(req);
-      }
-
-      if (uri.pathname === "/following") {
-        return await handleFollowing(req);
-      }
-
-      if (uri.pathname === "/outbox") {
-        return await handleOutbox(req);
-      }
-    }
-
-    if (req.method === "POST") {
-      if (uri.pathname === "/account") {
-        return await handleUpdateAccount(req);
-      }
-
-      if (uri.pathname === "/inbox") {
-        return handleInbox(req);
-      }
-
-      if (uri.pathname === "/create") {
-        return await handleCreate(req);
-      }
-    }
-
-    if (req.method === "OPTIONS") return respond(null, 204);
+    return await fn(req, info);
   } catch (err) {
+    console.error(err);
     return respond(err);
   }
-
-  return new Response(null, { status: 404, headers: CommonHeader });
 }
 
 function handleWebfinger(req: Request) {
@@ -321,21 +241,15 @@ function handleWebfinger(req: Request) {
   const resource = uri.searchParams.get("resource");
 
   if (!resource || !resource.startsWith("acct:")) {
-    return respond(
-      new ErrorResponse(
-        "Please make sure 'resource' parameter with 'acct:name@host' format in your request",
-      ),
+    throw new ErrorResponse(
+      "Please make sure 'resource' parameter with 'acct:name@host' format in your request",
     );
   }
 
-  const i = resource.indexOf("@", 6);
-  const name = resource.slice(5, i);
-  console.log(name);
+  const name = resource.slice(5, resource.indexOf("@", 5));
 
   if (name !== Username) {
-    return respond(
-      new ErrorResponse(`Not found record of '${resource}'`, "Not found", 404),
-    );
+    throw new ErrorResponse(`Not found record of '${resource}'`, 404);
   }
 
   return respond({
@@ -376,19 +290,15 @@ async function handleUpdateAccount(req: Request) {
   const input = await authenticate<UpdateAccountInput>(req);
   const params: { key: string; value: unknown }[] = [];
 
-  if ("nickname" in input) {
+  if (typeof input.nickname === "string") {
     params.push({ key: "nickname", value: input.nickname });
   }
 
-  if ("avatar" in input) {
+  if (typeof input.avatar === "string") {
     params.push({ key: "avatar", value: input.avatar });
   }
 
-  const res = await db.put(BaseSummary, params);
-
-  if ("errors" in res) {
-    throw new ErrorResponse(res.errors.join(";"), "Update fail", 400);
-  }
+  await db.put(BaseSummary, params);
   return respond(null, 204);
 }
 
@@ -404,8 +314,8 @@ async function handleCreate(req: Request) {
   const json = await authenticate<CreateInput>(req);
   const uri = new URL(req.url);
 
-  if (!("message" in json && typeof json.message === "string")) {
-    throw new ErrorResponse("Invalid message format");
+  if (typeof json.message !== "string") {
+    throw new ErrorResponse("Invalid message format", 400);
   }
 
   const id = newId();
@@ -435,31 +345,24 @@ async function handleCreate(req: Request) {
 
 async function authenticate<T>(req: Request) {
   const sign = req.headers.get("x-api-signature");
+  const nonce = req.headers.get("x-api-nonce");
 
-  if (!sign) {
-    throw new ErrorResponse(`Invalid signature: '${sign}'`, "Forbidden", 403);
-  }
+  if (!sign) throw new ErrorResponse(`Required signature header`, 400);
+  if (!nonce) throw new ErrorResponse(`Required nonce header`, 400);
 
-  const body = new Uint8Array(await req.arrayBuffer());
+  const text = await req.text();
+  const body = new TextEncoder().encode(text + nonce);
   const signBuf = toBytes(sign);
   if (!await ed25519.verify(signBuf, body, AdminPublicKey)) {
-    throw new ErrorResponse("Unverified signature", "Forbidden", 403);
+    throw new ErrorResponse("Unverified signature", 403);
+  }
+  try {
+    await db.insert(BaseNonce, { key: nonce }, ~~(Date.now() / 1000 + 30));
+  } catch {
+    throw new ErrorResponse("Nonce has been used", 400);
   }
 
-  const json = JSON.parse(
-    new TextDecoder().decode(body),
-  ) as (T & { nonce: string });
-
-  if ("nonce" in json) {
-    try {
-      const expires = ~~(Date.now() / 1000 + 30);
-      await db.insert(BaseNonce, { key: json.nonce }, expires);
-    } catch {
-      throw new ErrorResponse("Nonce has been used");
-    }
-  }
-
-  return json as T;
+  return JSON.parse(text) as T;
 }
 
 function respond(data: unknown, status = 200) {
@@ -470,7 +373,6 @@ function respond(data: unknown, status = 200) {
 function collectionHandler<T>(
   path: string,
   base: string,
-  summary: string,
   mapFn: (i: T) => unknown,
 ) {
   return async (req: Request) => {
@@ -490,11 +392,11 @@ function collectionHandler<T>(
           : void 0,
       });
     } else {
-      const total = await db.fetch<{ value: number }>(BaseSummary, summary);
+      const res = await db.query(base);
       return respond({
         "@context": ["https://www.w3.org/ns/activitystreams"],
         type: "OrderedCollection",
-        totalItems: total?.value || 0,
+        totalItems: res.paging.size,
         id: `${Origin || uri.origin}/${path}`,
         first: `${Origin || uri.origin}/${path}?key=`,
       });
@@ -503,11 +405,7 @@ function collectionHandler<T>(
 }
 
 function toHex(buf: Uint8Array | ArrayBuffer) {
-  if (buf instanceof ArrayBuffer) {
-    buf = new Uint8Array(buf);
-  }
-
-  return new TextDecoder().decode(_hex.encode(buf as Uint8Array));
+  return new TextDecoder().decode(_hex.encode(new Uint8Array(buf)));
 }
 
 function toBytes(hex: string) {
@@ -527,9 +425,7 @@ function decodeKey(str: string) {
 async function queueSendtask(data: CreateAPData) {
   const list = await db.queryAll<Follower>(BaseFollowers);
 
-  for (const item of list) {
-    await signAndSend(data, item.inbox);
-  }
+  for (const item of list) await signAndSend(data, item.inbox);
 }
 
 async function signAndSend(data: unknown, inbox: string) {
@@ -542,7 +438,7 @@ async function signAndSend(data: unknown, inbox: string) {
     `(request-target): post ${uri.pathname}\nhost: ${uri.host}\ndate: ${date}\ndigest: SHA-256=${hash}`;
   const strBuf = encoder.encode(strToSign);
   const sign = base64.encode(
-    await crypto.subtle.sign({ name: "RSA-OAEP" }, PrivateKey, strBuf),
+    await crypto.subtle.sign({ name: "RSA-PSS" }, PrivateKey, strBuf),
   );
 
   const res = await fetch(inbox, {
@@ -561,15 +457,13 @@ async function signAndSend(data: unknown, inbox: string) {
 }
 
 if (import.meta.main) {
-  if (AdminPublicKey.length != 32) {
-    throw new Error("Invalid Public Key");
-  }
+  if (AdminPublicKey.length != 32) throw new Error("Invalid Public Key");
 
   start();
 }
 
 type DBUpdateParams = Partial<{
-  set: Record<string, unknown>;
+  set: AnyObject;
   increment: Record<string, number>;
   append: Record<string, unknown[]>;
   prepend: Record<string, unknown[]>;
@@ -600,3 +494,5 @@ type Follower = {
   actor: string;
   inbox: string;
 };
+
+type AnyObject = Record<string, unknown>;
