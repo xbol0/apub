@@ -131,6 +131,8 @@ const CommonHeader = {
 
 const Router = new Map<string, http.Handler>();
 Router.set("GET/.well-known/webfinger", handleWebfinger);
+Router.set("GET/.well-known/nodeinfo", handleNodeinfo);
+Router.set("GET/nodeinfo", handleNodeinfo);
 Router.set("GET/@" + Username, handleAccount);
 Router.set(
   "GET/followers",
@@ -341,6 +343,32 @@ async function handleCreate(req: Request) {
 
   queueMicrotask(() => queueSendtask(data));
   return respond(null, 201);
+}
+
+function handleNodeinfo(req: Request) {
+  const uri = new URL(req.url);
+
+  return respond(
+    uri.pathname === "/nodeinfo"
+      ? {
+        "version": "2.0",
+        "software": { "name": "apub", "version": "0.1.0" },
+        "protocols": ["activitypub"],
+        "services": { "outbound": [], "inbound": [] },
+        "usage": {
+          "users": { "total": 1, "activeMonth": 1, "activeHalfyear": 1 },
+          "localPosts": 0,
+        },
+        "openRegistrations": false,
+        "metadata": {},
+      }
+      : {
+        "links": [{
+          "rel": "http://nodeinfo.diaspora.software/ns/schema/2.0",
+          "href": `${Origin || uri.origin}/nodeinfo`,
+        }],
+      },
+  );
 }
 
 async function authenticate<T>(req: Request) {
