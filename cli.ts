@@ -31,17 +31,18 @@ async function start() {
   await sendCreate(args._[0] as string);
 }
 
-async function sendCreate(text: string) {
-  const str = new TextEncoder().encode(
-    JSON.stringify({ message: text, nonce: crypto.randomUUID() }),
-  );
+async function sendCreate(message: string) {
+  const body = JSON.stringify({ message });
+  const nonce = crypto.randomUUID();
+  const str = new TextEncoder().encode(body + nonce);
   const sign = await ed25519.sign(str, PrivateKey);
   const res = await fetch(Endpoint, {
     method: "POST",
-    body: str,
+    body,
     headers: {
       "content-type": "application/json",
       "x-api-signature": toHex(sign),
+      "x-api-nonce": nonce,
     },
   });
   console.log(res.status, await res.json());
