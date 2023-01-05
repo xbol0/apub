@@ -122,6 +122,7 @@ const BaseFollowers = Prefix + "followers";
 const BaseFollowing = Prefix + "following";
 const BaseNonce = Prefix + "nonce";
 const BaseOutbox = Prefix + "outbox";
+const BaseInbox = Prefix + "inbox";
 
 const CommonHeader = {
   "content-type": "application/json",
@@ -304,11 +305,14 @@ async function handleUpdateAccount(req: Request) {
   return respond(null, 204);
 }
 
-function handleInbox(req: Request) {
+async function handleInbox(req: Request) {
   // validate signature
   if (!req.headers.has("digest") || !req.headers.has("signature")) {
     throw new ErrorResponse("Require 'Digest' and 'Signature' headers");
   }
+
+  const json = await req.json();
+  await db.insert(BaseInbox, { ...json, key: newId() });
   return respond(null, 202);
 }
 
@@ -475,7 +479,8 @@ async function signAndSend(data: unknown, inbox: string) {
     headers: {
       "content-type": "application/ld+json",
       digest: `SHA-256=${toHex(hash)}`,
-      signature: sign,
+      signature:
+        `keyId="${uri.origin}/@${Username}#main-key",headers="(request-target) host date digest",signature="${sign}"`,
       host: uri.host,
       date: date,
     },
